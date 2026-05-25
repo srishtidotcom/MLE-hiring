@@ -71,6 +71,14 @@ class RoutingAgent:
 		language, language_confidence = self._detect_language(text)
 		pii_detected, _ = self.pii_detector.detect(text)
 
+		# PII should raise sensitivity, but only one step at a time so routine support
+		# tickets with incidental personal data do not jump straight to the top tier.
+		if pii_detected:
+			bumped_risk_level = self._bump_risk_level(risk_level)
+			if bumped_risk_level != risk_level:
+				risk_level = bumped_risk_level
+				risk_confidence = max(0.05, round(risk_confidence - 0.02, 3))
+
 		confidence = round(
 			max(
 				0.05,
@@ -89,11 +97,13 @@ class RoutingAgent:
 			3,
 		)
 
+		if risk_level == "medium":
+			confidence = round(max(0.05, confidence - 0.02), 3)
+		elif risk_level == "high":
+			confidence = round(max(0.05, confidence - 0.03), 3)
+
 		if not company:
 			company = company_hint or "unknown"
-
-		if pii_detected and risk_level == "low":
-			risk_level = "medium"
 
 		return TicketClassification(
 			company=company,
@@ -220,83 +230,85 @@ class RoutingAgent:
 	def _infer_risk_level(self, text: str) -> Tuple[str, float]:
 		lowered = text.lower()
 
-		critical_markers = (
-			"legal threat",
-			"lawsuit",
-			"sue",
-			"gdpr",
-			"right to erasure",
-			"delete everything",
-			"delete all data",
-			"delete my data",
-			"prompt injection",
-			"system prompt",
-			"ceo",
-			"chief executive",
-			"executive",
-			"identity theft",
-			"fraud ring",
-			"data breach",
-			"security vulnerability",
+		# Risk philosophy: safety-first, but do not turn routine support into escalations.
+		# Critical stays rare and specific, high is reserved for clear fraud or takeover
+		# signals, medium covers ordinary account/billing friction, and low is the default.
+		critical_rules = (
+			(
+				("lawsuit", "sue", "legal action", "discrimination"),
+				("legal threat", "legal escalation", "legal notice"),
+			),
+			(
+				("gdpr", "delete everything", "delete all my data", "right to erasure"),
+				("delete all data", "delete my data", "erase my data", "data deletion"),
+			),
+			(
+				("identity theft", "hacked", "someone else", "compromised account"),
+				("account takeover", "unauthorized access", "account compromised"),
+			),
+			(
+				("prompt injection", "jailbreak", "system prompt", "ignore previous instructions"),
+				("prompt override", "developer message", "instruction bypass"),
+			),
+			(
+				("delete everything", "delete all files", "data exfiltration", "security vulnerability"),
+				("vulnerability disclosure", "exfiltrate", "leak data", "dump data"),
+			),
 		)
-		if self._has_any(lowered, critical_markers):
-			return "critical", 0.88
+		for required, optional in critical_rules:
+			if self._has_any(lowered, required) or self._has_any(lowered, optional):
+				return "critical", 0.86
 
-		high_markers = (
-			"card number",
-			"account hacked",
-			"unauthorized charge",
-			"fraud",
-			"stolen card",
-			"password changed",
-			"take over",
-			"compromised",
-			"pii",
-			"ssn",
-			"aadhaar",
-			"pan",
+		high_rules = (
+			(
+				("unauthorized charge", "fraud", "stolen card", "chargeback"),
+				("financial fraud", "card fraud", "disputed charge", "card blocked", "suspicious activity"),
+				False,
+			),
+			(
+				("card blocked",),
+				("suspicious", "fraud", "fraudulent", "unauthorized"),
+				True,
+			),
+			(
+				("restore my access", "regain access", "restore access"),
+				("admin", "owner", "administrator", "account owner", "high sensitivity"),
+				True,
+			),
 		)
-		if self._has_any(lowered, high_markers):
-			return "high", 0.84
+		for required, contextual, require_context in high_rules:
+			if self._has_any(lowered, required) and (self._has_any(lowered, contextual) or not require_context):
+				return "high", 0.78
 
-		medium_markers = (
-			"billing",
-			"refund",
-			"subscription",
-			"cancel my subscription",
-			"payment",
-			"charge",
-			"dispute",
-			"access lost",
-			"locked out",
-			"cannot log in",
-			"unable to login",
-			"login issue",
-			"verify my account",
+		medium_rules = (
+			("refund", "billing dispute", "billing issue", "subscription cancellation", "cancel subscription", "payment failed"),
+			("billing", "subscription", "charge", "dispute", "refund request", "payment failure"),
+			("login issue", "cannot log in", "unable to login", "locked out", "access issue", "access problems"),
+			("payment", "declined", "failed payment", "card declined", "payment error"),
 		)
-		if self._has_any(lowered, medium_markers):
-			return "medium", 0.76
+		for markers in medium_rules:
+			if self._has_any(lowered, markers):
+				return "medium", 0.7
 
-		low_markers = (
-			"how do i",
-			"how to",
-			"what is",
-			"where do i",
-			"when should i",
-			"please explain",
-			"best practice",
-			"technical issue",
-			"not working",
-			"error",
-			"bug",
-			"fails",
-			"failing",
-			"stopped working",
+		low_rules = (
+			("how do i", "how to", "not working", "error", "bug", "fails", "failing", "stopped working"),
+			("technical issue", "interview", "assessment", "test", "exam", "submission", "student", "education"),
+			("what is", "where do i", "when should i", "please explain", "best practice", "feature request"),
+			("visa vs mastercard", "comparison", "compare", "which is better"),
 		)
-		if self._has_any(lowered, low_markers):
-			return "low", 0.66
+		for markers in low_rules:
+			if self._has_any(lowered, markers):
+				return "low", 0.66
 
-		return "low", 0.52
+		return "low", 0.48
+
+	def _bump_risk_level(self, risk_level: str) -> str:
+		risk_order = ["low", "medium", "high", "critical"]
+		try:
+			current_index = risk_order.index(risk_level)
+		except ValueError:
+			return "low"
+		return risk_order[min(current_index + 1, len(risk_order) - 1)]
 
 	def _detect_language(self, text: str) -> Tuple[str, float]:
 		lowered = text.lower()
