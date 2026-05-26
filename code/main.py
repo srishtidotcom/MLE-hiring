@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
+import subprocess
+import sys
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,7 +61,7 @@ class TicketAnalysisPipeline:
 			source_documents=source_documents,
 		)
 		reflection_payload = _dump_model(reflection_result)
-		status = _decide_status(_dump_model(safety_result), classification_payload, evidence_payload, reflection_payload)
+		status = _decide_status(_dump_model(safety_result), classification_payload, evidence_payload, reflection_payload, generated_payload)
 		actions = self.tool_engine.build_actions(
 			ticket=ticket,
 			classification=classification_payload,
@@ -160,6 +164,7 @@ def _decide_status(
 	classification: Dict[str, Any],
 	evidence: Dict[str, Any],
 	reflection: Dict[str, Any],
+	generated: Dict[str, Any] | None = None,
 ) -> str:
 	if bool(safety.get("is_adversarial", False)):
 		return "escalated"
@@ -169,6 +174,8 @@ def _decide_status(
 		return "escalated"
 	if str(reflection.get("final_action", "escalate")) != "accept":
 		return "escalated"
+	if generated and "escalat" in str(generated.get("response", "")).lower():
+		return "escalated"
 	return "replied"
 
 
@@ -176,19 +183,80 @@ def _collect_source_documents(evidence: Dict[str, Any], retrieval: Any) -> str:
 	sources = []
 	for source in evidence.get("top_sources", []) or []:
 		source_text = str(source).strip()
-		if source_text and source_text not in sources:
+		if _valid_source(source_text) and source_text not in sources:
 			sources.append(source_text)
 
 	if not sources and retrieval:
 		for chunk in retrieval:
 			filepath = str(chunk.get("filepath", "")).strip()
-			if filepath and filepath not in sources:
+			if _valid_source(filepath) and filepath not in sources:
 				sources.append(filepath)
 
 	return "|".join(sources)
 
 
+def _valid_source(source: str) -> bool:
+	return bool(source and source.startswith("data/") and len(source) > 8)
+
+
+def _weighted_confidence(
+	evidence: Dict[str, Any],
+	reflection: Dict[str, Any],
+	classification: Dict[str, Any],
+) -> float:
+	evidence_score = _as_score(evidence.get("confidence"), 0.0)
+	reflection_score = _as_score(reflection.get("confidence"), 0.0)
+	routing_score = _as_score(classification.get("confidence"), 0.0)
+	return round((0.40 * evidence_score) + (0.40 * reflection_score) + (0.20 * routing_score), 4)
+
+
+def _as_score(value: Any, default: float) -> float:
+	try:
+		return max(0.0, min(1.0, float(value)))
+	except (TypeError, ValueError):
+		return default
+
+
+def _actions_json(actions: Any) -> str:
+	if not isinstance(actions, list):
+		return "[]"
+	try:
+		return json.dumps(actions, ensure_ascii=False)
+	except (TypeError, ValueError):
+		return "[]"
+
+
+def _clean_response_text(response: Any, source_documents: str) -> str:
+	text = str(response or "")
+	text = re.sub(r"\s+", " ", text).strip()
+	text = re.sub(r"\s*Sources:\s*.*$", "", text, flags=re.IGNORECASE).strip()
+	if source_documents:
+		return f"{text}\nSources: {source_documents}".strip()
+	return text
+
+
+def _print_final_stats(rows: list[Dict[str, Any]], runtime_seconds: float, validation_code: int) -> None:
+	total = len(rows)
+	replied = sum(1 for row in rows if str(row.get("status", "")).lower() == "replied")
+	escalated = sum(1 for row in rows if str(row.get("status", "")).lower() == "escalated")
+	with_sources = sum(1 for row in rows if str(row.get("source_documents", "")).strip())
+	avg_confidence = (
+		sum(_as_score(row.get("confidence_score"), 0.0) for row in rows) / total
+		if total
+		else 0.0
+	)
+	source_pct = (with_sources / total * 100.0) if total else 0.0
+	print("\nFinal stats")
+	print(f"- Tickets processed: {total}")
+	print(f"- Replied/escalated: {replied}/{escalated}")
+	print(f"- Rows with sources: {source_pct:.1f}%")
+	print(f"- Average confidence: {avg_confidence:.4f}")
+	print(f"- Runtime: {runtime_seconds:.1f}s ({runtime_seconds / 60.0:.1f} min)")
+	print(f"- validate_output.py exit code: {validation_code}")
+
+
 def main() -> None:
+	start_time = time.perf_counter()
 	repo_root = Path(__file__).resolve().parents[1]
 	tickets_path = repo_root / "support_tickets" / "support_tickets.csv"
 	output_path = repo_root / "support_tickets" / "output.csv"
@@ -218,24 +286,21 @@ def main() -> None:
 			generated = result.get("generated", {})
 			reflection = result.get("reflection", {})
 			retrieval = result.get("retrieval", [])
-			status = result.get("status") or _decide_status(safety, classification, evidence, reflection)
+			status = _decide_status(safety, classification, evidence, reflection, generated)
 			source_documents = result.get("source_documents") or _collect_source_documents(evidence, retrieval)
-			actions_taken = json.dumps(result.get("actions", []), ensure_ascii=False)
+			response_text = _clean_response_text(generated.get("response", ""), source_documents)
+			actions_taken = _actions_json(result.get("actions", []))
 
 			row_out = {
 				"issue": row.get("Issue", ""),
 				"subject": row.get("Subject", ""),
 				"company": row.get("Company", ""),
-				"response": generated.get("response", ""),
+				"response": response_text,
 				"product_area": classification.get("product_area", "general_support"),
 				"status": status,
 				"request_type": classification.get("request_type", "product_issue"),
 				"justification": _build_justification(safety, classification, evidence, reflection, generated, status),
-				"confidence_score": min(
-					float(evidence.get("confidence", classification.get("confidence", 0.0)) or 0.0),
-					float(generated.get("confidence", 1.0) or 1.0),
-					float(reflection.get("confidence", 1.0) or 1.0),
-				),
+				"confidence_score": _weighted_confidence(evidence, reflection, classification),
 				"source_documents": source_documents,
 				"risk_level": classification.get("risk_level", "low"),
 				"pii_detected": result.get("pii_detected", False),
@@ -279,6 +344,9 @@ def main() -> None:
 	out_df = pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
 	out_df.to_csv(output_path, index=False)
 	print(f"Wrote output to {output_path}")
+	print("Running validate_output.py")
+	validation = subprocess.run([sys.executable, str(repo_root / "code" / "validate_output.py")], check=False)
+	_print_final_stats(rows, time.perf_counter() - start_time, validation.returncode)
 
 
 if __name__ == "__main__":

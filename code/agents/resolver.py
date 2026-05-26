@@ -143,18 +143,16 @@ class ResponseGenerator:
 
 		if action == "reply":
 			response = (
-				f"Thanks for reaching out. Based on the available {company} support documentation, "
-				f"the relevant guidance is: {excerpt} "
-				"If this does not match what you are seeing, please share the non-sensitive error text "
-				"or the exact step where the issue occurs so support can continue from the documented flow."
+				f"Thanks for reaching out. The available {company} documentation says: {excerpt} "
+				"If this does not resolve the issue, please share only non-sensitive error text or the step "
+				"where the problem occurs."
 			)
 			confidence = float(evidence_result.get("confidence", 0.65) or 0.65)
 			reasoning = "Rule fallback used the highest-ranked retrieved excerpt and cited all source documents."
 		else:
 			response = (
 				f"Thanks for the context. I found related {company} documentation, but it does not fully support "
-				"a complete resolution for this request. I am escalating this so a specialist can review it with "
-				"the right account and policy context."
+				"a complete resolution. I am escalating this so a specialist can review it with the right context."
 			)
 			confidence = min(0.55, float(evidence_result.get("confidence", 0.45) or 0.45))
 			reasoning = "Rule fallback chose escalation because evidence was partial or not action-complete."
@@ -167,7 +165,8 @@ class ResponseGenerator:
 
 	def _sanitize_response(self, text: str) -> str:
 		_, redacted = self.pii_detector.detect(text or "")
-		redacted = re.sub(r"(?i)\b(ignore previous|system prompt|developer message|hidden instructions)\b", "[redacted]", redacted)
+		redacted = self._strict_redact(redacted)
+		redacted = re.sub(r"(?i)\b(ignore previous|system prompt|developer message|hidden instructions?)\b", "[redacted]", redacted)
 		return re.sub(r"\s+", " ", redacted).strip()
 
 	def _redact(self, text: str) -> str:
@@ -188,8 +187,9 @@ class ResponseGenerator:
 		for chunk in chunks:
 			text = str(chunk.get("text", "")).strip()
 			if text:
-				first_sentence = re.split(r"(?<=[.!?])\s+", text.replace("\n", " "))[0]
-				return first_sentence[:360].strip()
+				cleaned = ResponseGenerator._clean_excerpt(text)
+				if cleaned:
+					return cleaned[:320].strip()
 		return "the retrieved documentation contains related guidance, but no concise answerable excerpt was available."
 
 	@staticmethod
@@ -217,20 +217,46 @@ class ResponseGenerator:
 		sources: List[str] = []
 		for source in evidence_result.get("top_sources", []) or []:
 			value = str(source).strip()
-			if value and value not in sources:
+			if ResponseGenerator._valid_source(value) and value not in sources:
 				sources.append(value)
 		for chunk in chunks:
 			value = str(chunk.get("filepath", "")).strip()
-			if value and value not in sources:
+			if ResponseGenerator._valid_source(value) and value not in sources:
 				sources.append(value)
 		return "|".join(sources[:5])
 
 	@staticmethod
 	def _ensure_citations(response: str, sources: str) -> str:
 		citation_line = f"Sources: {sources or 'none'}"
-		if "Sources:" in response:
-			return re.sub(r"Sources:\s*.*$", citation_line, response, flags=re.IGNORECASE).strip()
-		return f"{response} {citation_line}".strip()
+		body = re.sub(r"\s*Sources:\s*.*$", "", response or "", flags=re.IGNORECASE).strip()
+		return f"{body}\n{citation_line}".strip()
+
+	@staticmethod
+	def _valid_source(source: str) -> bool:
+		return bool(source and source.startswith("data/") and len(source) > 8)
+
+	@staticmethod
+	def _clean_excerpt(text: str) -> str:
+		cleaned = re.sub(r"(?s)^---.*?---", " ", text)
+		cleaned = re.sub(r"https?://\S+", "", cleaned)
+		cleaned = re.sub(r"[#*_`>|]+", " ", cleaned)
+		cleaned = re.sub(r"\b(?:title|source_url|final_url|last_modified|description):\s*", "", cleaned, flags=re.IGNORECASE)
+		cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:")
+		sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", cleaned) if len(part.strip()) > 25]
+		return sentences[0] if sentences else cleaned
+
+	@staticmethod
+	def _strict_redact(text: str) -> str:
+		redacted = text or ""
+		replacements = (
+			(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b", "[EMAIL]"),
+			(r"\+?\d[\d\s().-]{8,}\d", "[PHONE]"),
+			(r"\b(?:case|order|ticket|reference|customer|account)\s*(?:id|number|#)?\s*[:#-]?\s*[A-Z0-9_-]{6,}\b", "[ACCOUNT_NUMBER]"),
+			(r"\b(?:sk|pk|cs|tok|key|secret)_[A-Za-z0-9_-]{8,}\b", "[SECRET]"),
+		)
+		for pattern, replacement in replacements:
+			redacted = re.sub(pattern, replacement, redacted, flags=re.IGNORECASE)
+		return redacted
 
 	@staticmethod
 	def _coerce_response(value: Any) -> GeneratedResponse:
