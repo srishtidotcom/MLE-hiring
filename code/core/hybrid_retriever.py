@@ -43,6 +43,8 @@ class HybridRetriever:
     def __init__(self, index_dir: Optional[Path] = None) -> None:
         self.repo_root = Path(__file__).resolve().parents[2]
         self.index_dir = self._resolve_index_dir(index_dir)
+        print(f"Looking for index in: {self._index_candidates(index_dir)}")
+        print(f"Index found: {self.index_dir}")
         self._artifacts = self._load_cached_artifacts(str(self.index_dir)) if self.index_dir else None
         self._embedder: Optional[Embedder] = None
         self._query_cache: Dict[Tuple[str, int, str], List[DocumentChunk]] = {}
@@ -95,7 +97,7 @@ class HybridRetriever:
             filepath = str(metadata.get("filepath", ""))
             company = str(metadata.get("company", "")).lower()
 
-            if company_filter_norm and company_filter_norm not in {company, company.title().lower()}:
+            if company_filter_norm and company_filter_norm not in company:
                 continue
             if filepath in seen_paths:
                 continue
@@ -130,7 +132,6 @@ class HybridRetriever:
         resolved = Path(index_dir)
         required_files = {
             "faiss": resolved / "faiss.index",
-            "bm25": resolved / "bm25_index.pkl",
             "metadata": resolved / "chunks_metadata.pkl",
             "embeddings": resolved / "embeddings.npy",
         }
@@ -138,10 +139,18 @@ class HybridRetriever:
             return None
 
         faiss_index = faiss.read_index(str(required_files["faiss"]))
-        with required_files["bm25"].open("rb") as handle:
-            bm25_index = pickle.load(handle)
         with required_files["metadata"].open("rb") as handle:
             chunk_metadata = pickle.load(handle)
+        bm25_path = resolved / "bm25_index.pkl"
+        if bm25_path.exists():
+            with bm25_path.open("rb") as handle:
+                bm25_index = pickle.load(handle)
+        else:
+            tokenized_corpus = [
+                [token for token in str(chunk.get("text", "")).lower().split() if token]
+                for chunk in chunk_metadata
+            ]
+            bm25_index = BM25Okapi(tokenized_corpus)
         embeddings = np.load(required_files["embeddings"])
 
         return _HybridArtifacts(
@@ -152,18 +161,35 @@ class HybridRetriever:
         )
 
     def _resolve_index_dir(self, explicit_index_dir: Optional[Path]) -> Optional[Path]:
-        candidates: Sequence[Path] = [
-            explicit_index_dir if explicit_index_dir is not None else Path(INDEX_DIR),
-            self.repo_root / "code" / "index",
-            self.repo_root / "index",
-        ]
-        for candidate in candidates:
-            if candidate is None:
-                continue
-            candidate_path = Path(candidate)
+        for candidate_path in self._index_candidates(explicit_index_dir):
             if (candidate_path / "faiss.index").exists():
                 return candidate_path
         return None
+
+    def _index_candidates(self, explicit_index_dir: Optional[Path]) -> List[Path]:
+        candidates: List[Path] = []
+        if explicit_index_dir is not None:
+            candidates.append(Path(explicit_index_dir).expanduser())
+
+        candidates.extend(
+            [
+                Path(INDEX_DIR),
+                self.repo_root / "index",
+                self.repo_root / "code" / "index",
+                self.repo_root.parent / "index",
+            ]
+        )
+
+        unique_candidates: List[Path] = []
+        seen = set()
+        for candidate in candidates:
+            normalized = candidate.expanduser()
+            key = str(normalized)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_candidates.append(normalized)
+        return unique_candidates
 
     def _embed_query(self, query: str) -> np.ndarray:
         if self._embedder is None:

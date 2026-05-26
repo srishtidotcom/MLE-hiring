@@ -45,10 +45,12 @@ class TicketAnalysisPipeline:
 
 
 def build_pipeline() -> TicketAnalysisPipeline:
+	retrieval_agent = RetrievalAgent()
+	print(f"Index status: {'LOADED' if retrieval_agent.hybrid_retriever._artifacts is not None else 'NOT FOUND'}")
 	return TicketAnalysisPipeline(
 		safety_agent=SafetyAgent(),
 		routing_agent=RoutingAgent(),
-		retrieval_agent=RetrievalAgent(),
+		retrieval_agent=retrieval_agent,
 		evidence_judge=EvidenceJudge(),
 	)
 
@@ -99,13 +101,25 @@ def _build_justification(
 
 
 def _decide_status(safety: Dict[str, Any], classification: Dict[str, Any], evidence: Dict[str, Any]) -> str:
-	if bool(safety.get("is_adversarial")):
-		return "escalated"
-	if str(evidence.get("recommended_action", "ask_clarification")) != "reply":
-		return "escalated"
-	if str(classification.get("risk_level", "low")) in {"high", "critical"}:
+	if str(evidence.get("recommended_action", "ask_clarification")) == "escalate":
 		return "escalated"
 	return "replied"
+
+
+def _collect_source_documents(evidence: Dict[str, Any], retrieval: Any) -> str:
+	sources = []
+	for source in evidence.get("top_sources", []) or []:
+		source_text = str(source).strip()
+		if source_text and source_text not in sources:
+			sources.append(source_text)
+
+	if not sources and retrieval:
+		for chunk in retrieval:
+			filepath = str(chunk.get("filepath", "")).strip()
+			if filepath and filepath not in sources:
+				sources.append(filepath)
+
+	return "|".join(sources)
 
 
 def main() -> None:
@@ -137,7 +151,7 @@ def main() -> None:
 			evidence = result.get("evidence", {})
 			retrieval = result.get("retrieval", [])
 			status = _decide_status(safety, classification, evidence)
-			source_documents = "|".join(evidence.get("top_sources", []))
+			source_documents = _collect_source_documents(evidence, retrieval)
 			actions_taken = "safety_check -> routing_check -> retrieval_check -> evidence_judge"
 			if not retrieval:
 				actions_taken += " -> no_evidence"

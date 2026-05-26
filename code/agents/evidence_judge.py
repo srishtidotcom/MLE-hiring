@@ -63,7 +63,7 @@ class EvidenceJudge:
 			[
 				(
 					"system",
-					"You are an evidence quality judge for support operations. Evaluate relevance, consistency, action support, and hallucination risk. Return only the structured result.",
+					"You are an evidence quality judge for support operations. Use a permissive standard: favor reply when evidence is mostly relevant and consistent, use ask_clarification for partial but usable evidence, and reserve escalate for clearly insufficient or strongly conflicting evidence. Return only the structured result.",
 				),
 				(
 					"human",
@@ -79,8 +79,8 @@ class EvidenceJudge:
 					"4) Hallucination risk if we reply now?\n\n"
 					"Decision philosophy:\n"
 					"- Strong, consistent, directly relevant -> reply\n"
-					"- Weak, conflicting, or missing -> escalate\n"
-					"- Partial evidence -> ask_clarification\n",
+					"- Partial but usable evidence -> ask_clarification\n"
+					"- Only clearly insufficient or strongly conflicting evidence -> escalate\n",
 				),
 			]
 		)
@@ -119,24 +119,29 @@ class EvidenceJudge:
 		direct_support = self._direct_support_score(ticket=ticket, texts=texts)
 		relevance = self._relevance_score(classification=classification, texts=texts)
 
-		quality = self._clamp((0.45 * avg_score) + (0.30 * direct_support) + (0.25 * relevance))
+		quality = self._clamp((0.40 * avg_score) + (0.35 * direct_support) + (0.25 * relevance))
 		if conflict_found:
-			quality = self._clamp(quality - 0.25)
+			quality = self._clamp(quality - 0.12)
 
-		if quality >= 0.72 and direct_support >= 0.6 and not conflict_found:
+		major_conflict = conflict_found and (
+			(direct_support < 0.30 and relevance < 0.30)
+			or quality < 0.25
+		)
+
+		if quality >= 0.45 and not major_conflict:
 			recommended_action: Literal["reply", "escalate", "ask_clarification"] = "reply"
 			sufficient = True
-			confidence = self._clamp(0.78 + 0.18 * quality)
+			confidence = self._clamp(0.68 + 0.22 * quality)
 			hallucination_risk = "low"
-		elif quality >= 0.45 and not conflict_found:
+		elif quality >= 0.25 and not major_conflict:
 			recommended_action = "ask_clarification"
 			sufficient = False
-			confidence = self._clamp(0.45 + 0.30 * quality)
+			confidence = self._clamp(0.42 + 0.28 * quality)
 			hallucination_risk = "medium"
 		else:
 			recommended_action = "escalate"
 			sufficient = False
-			confidence = self._clamp(0.55 + 0.25 * max(0.2, quality))
+			confidence = self._clamp(0.50 + 0.22 * max(0.15, quality))
 			hallucination_risk = "high"
 
 		reasoning = (

@@ -42,10 +42,28 @@ class RetrievalAgent:
 
 		query_plan = self._build_query_plan(ticket=ticket, classification=classification)
 		company_filter = self._normalize_company(classification.get("company", ""))
+		subject = str(ticket.get("subject", "") or "").strip() or "unknown subject"
+		print(
+			f"[RetrievalAgent] Ticket={subject!r} queries={len(query_plan.queries[:2])} company_filter={company_filter or 'none'}"
+		)
 
 		candidate_chunks: List[Dict[str, Any]] = []
-		for query in query_plan.queries[:2]:
+		queries = query_plan.queries[:2] or [subject]
+		for query_index, query in enumerate(queries, start=1):
+			print(f"[RetrievalAgent] Ticket={subject!r} query={query_index} text={query!r}")
 			chunks = self.hybrid_retriever.retrieve(query=query, top_k=8, company_filter=company_filter)
+			print(f"[RetrievalAgent] Ticket={subject!r} query={query_index} retrieved={len(chunks)} chunks")
+
+			if query_index == 1 and not chunks:
+				fallback_query = query_plan.queries[1] if len(query_plan.queries) > 1 else query
+				print(
+					f"[RetrievalAgent] Ticket={subject!r} query={query_index} fallback_text={fallback_query!r} company_filter=None"
+				)
+				chunks = self.hybrid_retriever.retrieve(query=fallback_query, top_k=8, company_filter=None)
+				print(
+					f"[RetrievalAgent] Ticket={subject!r} query={query_index} fallback_retrieved={len(chunks)} chunks"
+				)
+
 			for chunk in chunks:
 				hybrid_score = float(chunk.metadata.get("hybrid_score", 0.0))
 				candidate_chunks.append(
@@ -63,6 +81,9 @@ class RetrievalAgent:
 			query_plan=query_plan,
 			classification=classification,
 			top_k=top_k,
+		)
+		print(
+			f"[RetrievalAgent] Ticket={subject!r} candidate_chunks={len(candidate_chunks)} reranked_chunks={len(reranked)}"
 		)
 		return reranked
 

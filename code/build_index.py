@@ -32,7 +32,7 @@ def build_full_index() -> HybridRetriever:
     torch.manual_seed(42)
 
     repo_root = Path(__file__).resolve().parents[1]
-    index_dir = repo_root / "code" / "index"
+    index_dir = repo_root / "index"
     index_dir.mkdir(parents=True, exist_ok=True)
 
     loader = CorpusLoader(repo_root=repo_root)
@@ -64,7 +64,7 @@ def build_full_index() -> HybridRetriever:
 
 def load_hybrid_index(index_dir: Optional[Path] = None) -> HybridRetriever:
     repo_root = Path(__file__).resolve().parents[1]
-    resolved_index_dir = index_dir or (repo_root / "code" / "index")
+    resolved_index_dir = index_dir or (repo_root / "index")
 
     faiss_index = faiss.read_index(str(resolved_index_dir / "faiss.index"))
     with (resolved_index_dir / "bm25_index.pkl").open("rb") as handle:
