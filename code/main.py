@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import random
 import re
 import subprocess
 import sys
@@ -17,6 +19,7 @@ from agents.evidence_judge import EvidenceJudge
 from agents.reflector import ReflectionAgent
 from agents.resolver import ResponseGenerator
 from agents.retriever import RetrievalAgent
+from config import SEED
 from tools.tool_engine import ToolEngine
 
 
@@ -116,6 +119,27 @@ OUTPUT_COLUMNS = [
 	"language",
 	"actions_taken",
 ]
+
+
+def _seed_everything(seed: int = SEED) -> None:
+	os.environ["PYTHONHASHSEED"] = str(seed)
+	random.seed(seed)
+	try:
+		import numpy as np
+
+		np.random.seed(seed)
+	except Exception:
+		pass
+	try:
+		import torch
+
+		torch.manual_seed(seed)
+		if torch.cuda.is_available():
+			torch.cuda.manual_seed_all(seed)
+			torch.backends.cudnn.deterministic = True
+			torch.backends.cudnn.benchmark = False
+	except Exception:
+		pass
 
 
 def _dump_model(model: Any) -> Dict[str, Any]:
@@ -257,6 +281,7 @@ def _print_final_stats(rows: list[Dict[str, Any]], runtime_seconds: float, valid
 
 def main() -> None:
 	start_time = time.perf_counter()
+	_seed_everything()
 	repo_root = Path(__file__).resolve().parents[1]
 	tickets_path = repo_root / "support_tickets" / "support_tickets.csv"
 	output_path = repo_root / "support_tickets" / "output.csv"
