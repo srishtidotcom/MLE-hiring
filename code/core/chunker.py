@@ -11,11 +11,14 @@ from core.document import Document, DocumentChunk
 class DocumentChunker:
     """Split documents into overlapping chunks for retrieval."""
 
-    def __init__(self) -> None:
+    def __init__(self, chunk_size: int = 650, chunk_overlap: int = 100) -> None:
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
         self.splitter = RecursiveCharacterTextSplitter(
-            chunk_size=650,
-            chunk_overlap=100,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
             separators=["\n\n", "\n", ". ", " ", ""],
+            length_function=len,
         )
 
     def chunk_documents(self, documents: List[Document]) -> List[DocumentChunk]:
@@ -32,6 +35,7 @@ class DocumentChunker:
                     {
                         "chunk_index": chunk_index,
                         "chunk_count": total_chunks,
+                        "chunk_size": self.chunk_size,
                     }
                 )
 
@@ -46,10 +50,11 @@ class DocumentChunker:
                     )
                 )
 
-        print(f"Created {len(chunks)} chunks from {len(documents)} documents")
+        print(f"Created {len(chunks)} chunks from {len(documents)} documents "
+              f"(size={self.chunk_size}, overlap={self.chunk_overlap})")
         return chunks
 
     @staticmethod
     def _stable_chunk_id(document_id: str, chunk_index: int) -> str:
         source = f"{document_id}:{chunk_index}".encode("utf-8")
-        return hashlib.md5(source).hexdigest()
+        return hashlib.md5(source).hexdigest()[:16]
